@@ -233,6 +233,8 @@ IA_SHRINK_ALPHA = 0.60               # p_ajustada = alpha*p + (1-alpha)*tasa_bas
 IA_SHRINK_ALPHA_MIN = 0.45           # piso de mezcla (más conservador en descalibración fuerte)
 IA_SHRINK_ALPHA_MAX = 0.85           # techo de mezcla (más sensible cuando la calibración mejora)
 IA_BASE_RATE_WINDOW = 300            # cierres recientes para tasa base rolling
+# Anti-deadlock: si no hay cierres nuevos por un rato, no forzar shrink contra base_rate viejo.
+IA_SHRINK_STALE_CLOSED_MAX_AGE_S = 1200.0
 # Guardrail explícito de sobreconfianza en bucket alto (fase 1, bajo riesgo).
 IA_OVERCONF_BUCKET_MIN_PROB = 0.90
 IA_OVERCONF_MIN_N = 20
@@ -3729,7 +3731,7 @@ def _safe_read_csv_any_encoding(path: str) -> pd.DataFrame | None:
             continue
     return None
 
-_IA_RUNTIME_CAL_CACHE = {"ts": 0.0, "base_rate": 0.5, "n70": 0}
+_IA_RUNTIME_CAL_CACHE = {"ts": 0.0, "base_rate": 0.5, "n70": 0, "last_closed_age_s": None, "closed_tail_n": 0}
 _IA_OVERCONF_CACHE = {"ts": 0.0, "active": False, "cap": 1.0, "n": 0, "gap_pp": 0.0}
 _IA_HARD_GUARD_CACHE = {"ts": 0.0, "active": False, "cap": 1.0, "level": "GREEN", "closed": 0, "auc": 0.0, "reliable": False, "features": 0, "reasons": [], "until": 0.0}
 _IA_HARD_GUARD_BOT_CACHE = {"ts": 0.0, "data": {}}
@@ -4076,6 +4078,9 @@ def _leer_base_rate_y_n70(ttl_s: float = 30.0):
         base_rate = 0.5
         n70 = 0
 
+        last_closed_age_s = None
+        closed_tail_n = 0
+
         if df is not None and not df.empty and ("y" in df.columns):
             y = pd.to_numeric(df["y"], errors="coerce")
             mask_closed = y.isin([0, 1])
@@ -4083,14 +4088,34 @@ def _leer_base_rate_y_n70(ttl_s: float = 30.0):
             if not d.empty:
                 yv = pd.to_numeric(d["y"], errors="coerce")
                 tail = yv.tail(int(max(20, IA_BASE_RATE_WINDOW)))
+                closed_tail_n = int(len(tail))
                 if len(tail) > 0:
                     base_rate = float(tail.mean())
+
+                # Edad del último cierre (si está vieja, no conviene aplastar con shrink).
+                try:
+                    if "ts" in d.columns:
+                        ts_raw = str(d.iloc[-1].get("ts", "") or "").strip()
+                        if ts_raw:
+                            last_dt = pd.to_datetime(ts_raw, errors="coerce")
+                            if pd.notna(last_dt):
+                                now_dt = pd.Timestamp.utcnow().tz_localize(None)
+                                last_dt = pd.Timestamp(last_dt).tz_localize(None)
+                                last_closed_age_s = float(max(0.0, (now_dt - last_dt).total_seconds()))
+                except Exception:
+                    last_closed_age_s = None
 
                 if "prob" in d.columns:
                     pv = pd.to_numeric(d["prob"], errors="coerce")
                     n70 = int(((pv >= float(IA_CALIB_GOAL_THRESHOLD)) & yv.isin([0, 1])).sum())
 
-        _IA_RUNTIME_CAL_CACHE = {"ts": now, "base_rate": float(base_rate), "n70": int(n70)}
+        _IA_RUNTIME_CAL_CACHE = {
+            "ts": now,
+            "base_rate": float(base_rate),
+            "n70": int(n70),
+            "last_closed_age_s": (None if last_closed_age_s is None else float(last_closed_age_s)),
+            "closed_tail_n": int(closed_tail_n),
+        }
         return float(base_rate), int(n70)
     except Exception:
         return 0.5, 0
@@ -4210,6 +4235,13 @@ def _ajustar_prob_operativa(prob: float | None) -> float | None:
 
         if warmup or int(n70) < int(max(MIN_IA_SENIALES_CONF, 12)):
             return p
+
+        # Anti-deadlock: si hace mucho que no se cierra ninguna señal, usar base_rate
+        # histórico puede dejar la IA "pegada" en valores bajos y bloquear entradas.
+        last_closed_age_s = _IA_RUNTIME_CAL_CACHE.get("last_closed_age_s", None)
+        if isinstance(last_closed_age_s, (int, float)):
+            if float(last_closed_age_s) > float(max(60.0, IA_SHRINK_STALE_CLOSED_MAX_AGE_S)):
+                return p
 
         # Alpha adaptativo por calibración reciente:
         # - sube un poco cuando el modelo está estable y bien calibrado
