@@ -368,10 +368,41 @@ SOUND_PATHS = {
     "ia_53": "ia_scifi_08_53porciento_dry.wav",
 
 }
+# Fallbacks para no perder audio si faltan archivos específicos tras una actualización.
+SOUND_FALLBACKS = {
+    "perdida_real": ["perdida.wav", "ganabot.wav", "EVABOT.mp3"],
+    "perdida_demo": ["perdida.wav", "ganabot.wav", "EVABOT.mp3"],
+    "ganancia_real": ["ganabot.wav", "EVABOT.mp3"],
+    "ganancia_demo": ["ganabot.wav", "EVABOT.mp3"],
+    "meta_15": ["meta15%.wav", "ganabot.wav", "EVABOT.mp3"],
+    "racha_detectada": ["detectaracha.wav", "ganabot.wav", "EVABOT.mp3"],
+    "test": ["test.wav", "ganabot.wav", "EVABOT.mp3"],
+    "ia_53": ["ia_scifi_08_53porciento_dry.wav", "ganabot.wav", "EVABOT.mp3"],
+}
 AUDIO_AVAILABLE = False
 META_ACEPTADA = False
 MODAL_ACTIVO = False
 sonido_disparado = False
+
+
+def _resolver_ruta_sonido(evento: str) -> str | None:
+    """Resuelve el archivo de sonido con fallback para eventos faltantes."""
+    try:
+        base_dir = os.path.dirname(__file__)
+        candidatos = []
+        pref = SOUND_PATHS.get(evento)
+        if pref:
+            candidatos.append(pref)
+        for f in SOUND_FALLBACKS.get(evento, []):
+            if f not in candidatos:
+                candidatos.append(f)
+        for fname in candidatos:
+            p = os.path.join(base_dir, fname)
+            if os.path.exists(p):
+                return p
+    except Exception:
+        return None
+    return None
 # === FIN BLOQUE 2 ===
 
 # === BLOQUE 2.5 — PLAN OPERATIVO PATRÓN V1 (RESUMEN EJECUTIVO) ===
@@ -899,12 +930,11 @@ def init_audio():
 
     # 3) Cargar sonidos SOLO si mixer está operativo
     if pygame.mixer.get_init():
-        base_dir = os.path.dirname(__file__)
-        for event, filename in SOUND_PATHS.items():
+        for event in SOUND_PATHS.keys():
             if event in SOUND_LOAD_ERRORS:
                 continue
-            path = os.path.join(base_dir, filename)
-            if os.path.exists(path):
+            path = _resolver_ruta_sonido(event)
+            if path:
                 try:
                     SOUND_CACHE[event] = pygame.mixer.Sound(path)
                 except Exception:
@@ -935,14 +965,11 @@ def reproducir_evento(evento, es_demo=False, dentro_gatewin=True):
     # 2) Fallback winsound (si pygame no está usable o no cargó el sonido)
     if winsound:
         try:
-            filename = SOUND_PATHS.get(evento)
-            if not filename:
+            path = _resolver_ruta_sonido(evento)
+            if not path:
                 return
-            base_dir = os.path.dirname(__file__)
-            path = os.path.join(base_dir, filename)
-            if os.path.exists(path):
-                winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
-                sonido_disparado = True
+            winsound.PlaySound(path, winsound.SND_FILENAME | winsound.SND_ASYNC)
+            sonido_disparado = True
         except Exception:
             pass
 # === FIN BLOQUE 4 ===
@@ -11906,10 +11933,10 @@ DYN_ROOF_STEP = 0.010
 # Piso duro para REAL
 DYN_ROOF_FLOOR = AUTO_REAL_THR_MIN
 # Ventaja mínima del mejor vs segundo mejor
-DYN_ROOF_GAP = 0.02
+DYN_ROOF_GAP = 0.025
 # Confirmación mínima (ticks consecutivos del MISMO bot)
-DYN_ROOF_CONFIRM_TICKS = 1
-DYN_ROOF_TRIGGER_FORCE_STREAK = 1
+DYN_ROOF_CONFIRM_TICKS = 2
+DYN_ROOF_TRIGGER_FORCE_STREAK = 2
 DYN_ROOF_TRIGGER_FORCE_MARGIN = 0.005
 # Tolerancia para considerar "tocado" el techo (near-roof)
 DYN_ROOF_NEAR_TOL = 0.005
@@ -11918,8 +11945,8 @@ DYN_ROOF_LOW_N_MIN = 30
 DYN_ROOF_LOW_N_PENALTY = 0.01
 PROB_CLONE_STD_MIN = 0.01
 PROB_CLONE_GAP_MIN = 0.005
-REAL_POST_TRADE_COOLDOWN_S = 45
-REAL_POST_TRADE_COOLDOWN_CROWDED_S = 240
+REAL_POST_TRADE_COOLDOWN_S = 120
+REAL_POST_TRADE_COOLDOWN_CROWDED_S = 300
 DYN_ROOF_CROWD_P_MIN = 0.90
 DYN_ROOF_CROWD_MIN_BOTS = 3
 DYN_ROOF_CROWD_EXTRA_ROOF = 0.02
@@ -12785,6 +12812,16 @@ async def cargar_datos_bot(bot, token_actual):
                 estado_bots[bot]["ganancias"] += 1
             elif resultado == "PÉRDIDA":
                 estado_bots[bot]["perdidas"] += 1
+
+            # Audio por cierre real del trade (WIN/LOSS), preservando candados GateWIN/DEMO.
+            try:
+                es_demo_local = not (effective_owner == bot)
+                if resultado == "GANANCIA":
+                    reproducir_evento("ganancia_demo" if es_demo_local else "ganancia_real", es_demo=es_demo_local, dentro_gatewin=True)
+                elif resultado == "PÉRDIDA":
+                    reproducir_evento("perdida_demo" if es_demo_local else "perdida_real", es_demo=es_demo_local, dentro_gatewin=True)
+            except Exception:
+                pass
 
             total = estado_bots[bot]["tamano_muestra"]
             if total > 0:
