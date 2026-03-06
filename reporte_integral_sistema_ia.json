@@ -1,6 +1,6 @@
 {
-  "report_id": "3014c02786a7",
-  "generated_at_utc": "2026-03-06T02:33:25.815534+00:00",
+  "report_id": "6f8ee88bd3c6",
+  "generated_at_utc": "2026-03-06T03:06:22.996259+00:00",
   "sources": {
     "signals_log": "ia_signals_log.csv",
     "diag_json": "diagnostico_pipeline_ia.json",
@@ -229,6 +229,26 @@
       "AUC marginal; evitar inflado agresivo sin recalibrar"
     ]
   },
+  "model_meta_hotfix_plan": {
+    "eligible": false,
+    "reasons": [
+      "reliable=false",
+      "features<5",
+      "threshold_alto",
+      "p_pre_bajo_o_sin_evidencia_runtime"
+    ],
+    "current_threshold": 0.675,
+    "suggested_threshold": 0.62,
+    "mean_p_pre": null,
+    "impact_note": "limitado: p_pre no está cerca de la compuerta operativa",
+    "safety_rules": {
+      "require_reliable_false": true,
+      "require_features_lt5": true,
+      "require_auc_gte": 0.53,
+      "max_threshold_after_hotfix": 0.62,
+      "min_mean_p_pre_required": 0.45
+    }
+  },
   "operational_guidance": {
     "official_gate_threshold": 0.85,
     "shadow_suggested_threshold": 0.85,
@@ -250,5 +270,33 @@
       "closed_signals_target": 20,
       "bin_90_100_target": 8
     }
+  },
+  "root_cause_analysis": {
+    "primary_cause": "modelo_degradado_por_colapso_de_features",
+    "why_no_top": {
+      "p_best_lt_50": 0,
+      "trigger_no": 0,
+      "confirm_pending": 0
+    },
+    "model_reliable": false,
+    "feature_count": 3,
+    "mean_p_raw": null,
+    "mean_p_pre": null,
+    "target_operational_prob": 0.6,
+    "gap_to_operational_target": null,
+    "hotfix_likely_effective": false,
+    "will_happen_always": false,
+    "recovery_conditions": [
+      "recuperar >=5 features útiles en campeón",
+      "re-entrenar y validar con confiabilidad real (reliable=true)",
+      "evitar bajar compuertas sin evidencia de calibración"
+    ],
+    "ready_for_full_diagnosis": false
+  },
+  "model_meta_hotfix_result": {
+    "applied": false,
+    "path": "model_meta.json",
+    "backup": null,
+    "message": "Hotfix no elegible con las reglas de seguridad actuales."
   }
 }
