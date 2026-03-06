@@ -5,6 +5,7 @@ import argparse
 import csv
 import json
 import hashlib
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +29,8 @@ EWMA_MIN_SIGNALS_MATURE = 8
 THRESHOLD_HINT_MIN_CLOSED = 20
 THRESHOLD_HINT_MIN_BIN_90 = 8
 EWMA_HEALTH_MIN_MATURE_BOTS = 2
+RAW_PRE_GAP_ALERT = 0.35
+PRE_CAP_GAP_ALERT = 0.20
 
 
 def _safe_float(v: Any) -> float | None:
@@ -306,6 +309,88 @@ def _model_collapse_guard(meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _probability_path_health(meta: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+    threshold = _safe_float((meta or {}).get('threshold'))
+    auc = _safe_float((meta or {}).get('auc'))
+    reliable = bool((meta or {}).get('reliable', False))
+    feature_count = len(meta.get('feature_names', [])) if isinstance(meta.get('feature_names', []), list) else 0
+
+    lines = []
+    rt_path = runtime.get('path') if isinstance(runtime, dict) else None
+    if rt_path:
+        try:
+            lines = Path(str(rt_path)).read_text(encoding='utf-8', errors='ignore').splitlines()
+        except Exception:
+            lines = []
+
+    p_raw_vals: list[float] = []
+    p_pre_vals: list[float] = []
+    p_cap_vals: list[float] = []
+    with_raw_over_70 = 0
+    with_pre_over_50 = 0
+    recent_boost_events = 0
+
+    for ln in lines[-8000:]:
+        if 'WHY-NO:' in ln:
+            m_raw = re.search(r"p_raw=([0-9]+(?:\.[0-9]+)?)%", ln)
+            m_pre = re.search(r"p_pre=([0-9]+(?:\.[0-9]+)?)%", ln)
+            m_cap = re.search(r"p_cap=([0-9]+(?:\.[0-9]+)?)%", ln)
+            raw = float(m_raw.group(1)) / 100.0 if m_raw else None
+            pre = float(m_pre.group(1)) / 100.0 if m_pre else None
+            cap = float(m_cap.group(1)) / 100.0 if m_cap else None
+            if raw is not None:
+                p_raw_vals.append(raw)
+                if raw >= 0.70:
+                    with_raw_over_70 += 1
+            if pre is not None:
+                p_pre_vals.append(pre)
+                if pre >= 0.50:
+                    with_pre_over_50 += 1
+            if cap is not None:
+                p_cap_vals.append(cap)
+        if 'p_racha=' in ln or 'Incremental:' in ln:
+            recent_boost_events += 1
+
+    n_pairs = min(len(p_raw_vals), len(p_pre_vals))
+    mean_raw = (sum(p_raw_vals) / len(p_raw_vals)) if p_raw_vals else None
+    mean_pre = (sum(p_pre_vals) / len(p_pre_vals)) if p_pre_vals else None
+    mean_cap = (sum(p_cap_vals) / len(p_cap_vals)) if p_cap_vals else None
+    mean_raw_pre_gap = ((sum((r - p_pre_vals[i]) for i, r in enumerate(p_raw_vals[:n_pairs])) / n_pairs) if n_pairs > 0 else None)
+    pre_cap_pairs = min(len(p_pre_vals), len(p_cap_vals))
+    mean_pre_cap_gap = ((sum((p_pre_vals[i] - p_cap_vals[i]) for i in range(pre_cap_pairs)) / pre_cap_pairs) if pre_cap_pairs > 0 else None)
+
+    hints: list[str] = []
+    if feature_count < 5:
+        hints.append('features_activas_bajas(<5), posible compresión de probabilidad')
+    if isinstance(mean_raw_pre_gap, (int, float)) and mean_raw_pre_gap > RAW_PRE_GAP_ALERT:
+        hints.append('brecha alta p_raw→p_pre: revisar transformaciones previas al gate')
+    if isinstance(mean_pre_cap_gap, (int, float)) and mean_pre_cap_gap > PRE_CAP_GAP_ALERT:
+        hints.append('cap está recortando demasiado p_pre')
+    if not reliable:
+        hints.append('modelo marcado como no confiable (reliable=false)')
+    if isinstance(auc, (int, float)) and auc < 0.56:
+        hints.append('AUC marginal; evitar inflado agresivo sin recalibrar')
+    if len(lines) > 0 and recent_boost_events == 0:
+        hints.append('no se observaron eventos de boost incremental recientes en runtime')
+
+    return {
+        'threshold': threshold,
+        'auc': auc,
+        'reliable': reliable,
+        'feature_count': int(feature_count),
+        'runtime_samples': int(len(p_pre_vals)),
+        'mean_p_raw': mean_raw,
+        'mean_p_pre': mean_pre,
+        'mean_p_cap': mean_cap,
+        'mean_gap_raw_pre': mean_raw_pre_gap,
+        'mean_gap_pre_cap': mean_pre_cap_gap,
+        'ticks_raw_ge_70': int(with_raw_over_70),
+        'ticks_pre_ge_50': int(with_pre_over_50),
+        'recent_boost_events': int(recent_boost_events),
+        'hints': hints,
+    }
+
+
 def _parse_runtime_log(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {'exists': False, 'path': str(path), 'errors': {}, 'why_no_counts': {}}
@@ -449,6 +534,8 @@ def build_report(runtime_log: Path | None) -> dict[str, Any]:
     if runtime_used is not None:
         runtime = _parse_runtime_log(runtime_used)
 
+    probability_path = _probability_path_health(meta, runtime)
+
     promos_tail = []
     if PROMOS.exists():
         try:
@@ -497,6 +584,7 @@ def build_report(runtime_log: Path | None) -> dict[str, Any]:
         },
         'readiness_recommendation': readiness,
         'model_health': collapse_guard,
+        'probability_path_health': probability_path,
         'operational_guidance': guidance,
     }
     return report
@@ -582,7 +670,18 @@ def render_md(rep: dict[str, Any]) -> str:
     lines.append(f"- reliable: **{'SI' if mh.get('reliable') else 'NO'}** | AUC: **{mh.get('auc') if isinstance(mh.get('auc'), (int, float)) else 'N/A'}**")
     lines.append(f"- Bloquear promoción por colapso: **{'SI' if mh.get('block_promotion') else 'NO'}**")
 
-    lines.append('## 7) Salud de ejecución (auth/ws/timeout)')
+    lines.append('## 7) Salud de ruta de probabilidad (raw → pre → cap)')
+    ph = rep.get('probability_path_health', {}) or {}
+    lines.append(f"- threshold campeón: **{pct(ph.get('threshold'))}** | auc: **{ph.get('auc') if isinstance(ph.get('auc'), (int, float)) else 'N/A'}** | reliable: **{'SI' if ph.get('reliable') else 'NO'}**")
+    lines.append(f"- features activas: **{int(ph.get('feature_count', 0) or 0)}** | muestras runtime parseadas: **{int(ph.get('runtime_samples', 0) or 0)}**")
+    lines.append(f"- media p_raw: **{pct(ph.get('mean_p_raw'))}** | media p_pre: **{pct(ph.get('mean_p_pre'))}** | media p_cap: **{pct(ph.get('mean_p_cap'))}**")
+    lines.append(f"- gap medio raw→pre: **{pct(ph.get('mean_gap_raw_pre'))}** | gap medio pre→cap: **{pct(ph.get('mean_gap_pre_cap'))}**")
+    lines.append(f"- ticks con p_raw>=70%: **{int(ph.get('ticks_raw_ge_70', 0) or 0)}** | ticks con p_pre>=50%: **{int(ph.get('ticks_pre_ge_50', 0) or 0)}** | eventos boost recientes: **{int(ph.get('recent_boost_events', 0) or 0)}**")
+    hints = ph.get('hints') or []
+    lines.append(f"- Alertas de la ruta: {', '.join(hints) if hints else 'sin alertas'}")
+    lines.append('')
+
+    lines.append('## 8) Salud de ejecución (auth/ws/timeout)')
     rh = rep['runtime_health']
     if not rh.get('exists'):
         lines.append('- No auditado en este run (falta `--runtime-log`).')
@@ -595,7 +694,7 @@ def render_md(rep: dict[str, Any]) -> str:
             top = sorted(wh.items(), key=lambda x: x[1], reverse=True)[:8]
             lines.append('- WHY-NO más frecuentes: ' + ', '.join([f"{k}:{v}" for k, v in top]))
     lines.append('')
-    lines.append('## 8) Recomendación de cuándo correr este programa')
+    lines.append('## 9) Recomendación de cuándo correr este programa')
     lines.append('- **Recomendado siempre**: al iniciar sesión y luego cada 30-60 min.')
     lines.append('- **Corte de calidad fuerte**: después de cada bloque de +20 cierres nuevos.')
     lines.append('- **Punto mínimo para decisiones estructurales**:')
@@ -603,7 +702,7 @@ def render_md(rep: dict[str, Any]) -> str:
         lines.append(f"  - {'✅' if ok else '❌'} {k}")
     lines.append(f"- Ready for full diagnosis: **{rd['ready_for_full_diagnosis']}**")
     lines.append('')
-    lines.append('## 9) Qué falta corregir si no está “bien”')
+    lines.append('## 10) Qué falta corregir si no está “bien”')
     lines.append('- Nota: `Gap Prob-Hit señales` usa SOLO señales cerradas en `ia_signals_log.csv` y puede diferir de `WR last40 (csv)` del bot.')
     lines.append(f'- Gaps por bot se publican solo si `n señales IA >= {MIN_SIGNALS_FOR_BOT_GAP}` para evitar conclusiones con muestra mínima.')
     lines.append('- Si `precision@85` baja o n es pequeño: recalibrar/proteger compuerta.')

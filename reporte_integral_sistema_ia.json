@@ -1,12 +1,12 @@
 {
-  "report_id": "b13b0d1e83e1",
-  "generated_at_utc": "2026-03-04T01:08:01.424466+00:00",
+  "report_id": "3014c02786a7",
+  "generated_at_utc": "2026-03-06T02:33:25.815534+00:00",
   "sources": {
     "signals_log": "ia_signals_log.csv",
     "diag_json": "diagnostico_pipeline_ia.json",
     "model_meta": "model_meta.json",
     "real_state": "real_sim_state.json",
-    "runtime_log": "runtime_log_ia.txt"
+    "runtime_log": null
   },
   "calibration": {
     "closed_signals": 0,
@@ -104,9 +104,9 @@
   },
   "bot_alignment": {
     "fulll45": {
-      "rows_closed": 3480,
-      "wr_all": 0.5011494252873563,
-      "wr_last_n": 0.575,
+      "rows_closed": 4277,
+      "wr_all": 0.5003507131166706,
+      "wr_last_n": 0.6,
       "last_n": 40,
       "signals_n": 0,
       "signals_min_for_gap": 5,
@@ -115,9 +115,9 @@
       "prob_vs_wr_gap_last_n": null
     },
     "fulll46": {
-      "rows_closed": 3475,
-      "wr_all": 0.498705035971223,
-      "wr_last_n": 0.35,
+      "rows_closed": 4266,
+      "wr_all": 0.5044538209095171,
+      "wr_last_n": 0.625,
       "last_n": 40,
       "signals_n": 0,
       "signals_min_for_gap": 5,
@@ -126,9 +126,9 @@
       "prob_vs_wr_gap_last_n": null
     },
     "fulll47": {
-      "rows_closed": 3477,
-      "wr_all": 0.5021570319240725,
-      "wr_last_n": 0.5,
+      "rows_closed": 4270,
+      "wr_all": 0.4990632318501171,
+      "wr_last_n": 0.475,
       "last_n": 40,
       "signals_n": 0,
       "signals_min_for_gap": 5,
@@ -137,9 +137,9 @@
       "prob_vs_wr_gap_last_n": null
     },
     "fulll48": {
-      "rows_closed": 3492,
-      "wr_all": 0.5008591065292096,
-      "wr_last_n": 0.425,
+      "rows_closed": 4292,
+      "wr_all": 0.5034948741845293,
+      "wr_last_n": 0.575,
       "last_n": 40,
       "signals_n": 0,
       "signals_min_for_gap": 5,
@@ -148,9 +148,9 @@
       "prob_vs_wr_gap_last_n": null
     },
     "fulll49": {
-      "rows_closed": 3474,
-      "wr_all": 0.4948186528497409,
-      "wr_last_n": 0.45,
+      "rows_closed": 4270,
+      "wr_all": 0.4967213114754098,
+      "wr_last_n": 0.3,
       "last_n": 40,
       "signals_n": 0,
       "signals_min_for_gap": 5,
@@ -159,9 +159,9 @@
       "prob_vs_wr_gap_last_n": null
     },
     "fulll50": {
-      "rows_closed": 3486,
-      "wr_all": 0.5020080321285141,
-      "wr_last_n": 0.4,
+      "rows_closed": 4289,
+      "wr_all": 0.502448123105619,
+      "wr_last_n": 0.45,
       "last_n": 40,
       "signals_n": 0,
       "signals_min_for_gap": 5,
@@ -171,33 +171,23 @@
     }
   },
   "runtime_health": {
-    "exists": true,
-    "path": "runtime_log_ia.txt",
-    "lines": 79788,
-    "errors": {
-      "auth_error": 0,
-      "ws_error": 0,
-      "timeout": 0,
-      "api_error": 0
-    },
-    "why_no_counts": {
-      "warmup": 6404,
-      "n15_pending": 2705,
-      "n<80": 6404,
-      "p_best<58.0%": 5220,
-      "confirm_pending(0/2)": 6284,
-      "trigger_no": 9894,
-      "confirm_pending(1/2)": 18,
-      "p_best<55.0%": 31,
-      "p_best<57.2%": 3,
-      "p_best<57.5%": 1,
-      "confirm_pending(0/1)": 3681,
-      "none": 815
-    }
+    "exists": false,
+    "note": "Pasa --runtime-log <archivo> para auditar auth/websocket/WHY-NO tick a tick."
   },
   "token_real_state": {
     "real_sim_state": {},
-    "last_promotions_tail": []
+    "last_promotions_tail": [
+      "2026-03-05 08:55:40 - Token REAL (inmediato) asignado a fulll49 (ciclo 1)",
+      "2026-03-05 09:14:32 - Token REAL (inmediato) asignado a fulll47 (ciclo 1)",
+      "2026-03-05 09:28:30 - Token REAL (inmediato) asignado a fulll50 (ciclo 2)",
+      "2026-03-05 09:31:40 - Token REAL (inmediato) asignado a fulll48 (ciclo 3)",
+      "2026-03-05 09:41:05 - Token REAL (inmediato) asignado a fulll49 (ciclo 1)",
+      "2026-03-05 09:49:46 - Token REAL (inmediato) asignado a fulll49 (ciclo 1)",
+      "2026-03-05 09:52:15 - Token REAL (inmediato) asignado a fulll49 (ciclo 1)",
+      "2026-03-05 10:01:06 - Token REAL (inmediato) asignado a fulll49 (ciclo 1)",
+      "2026-03-05 10:03:24 - Token REAL (inmediato) asignado a fulll46 (ciclo 1)",
+      "2026-03-05 10:05:38 - Token REAL (inmediato) asignado a fulll45 (ciclo 2)"
+    ]
   },
   "readiness_recommendation": {
     "ready_for_full_diagnosis": false,
@@ -205,19 +195,39 @@
       "n_samples>=250": true,
       "closed_signals>=80": false,
       "reliable=true": false,
-      "auc>=0.53": false
+      "auc>=0.53": true
     },
-    "n_samples": 472,
+    "n_samples": 265,
     "closed_signals": 0,
-    "auc": 0.5054347826086957,
+    "auc": 0.5580357142857143,
     "reliable": false
   },
   "model_health": {
-    "feature_count": 2,
+    "feature_count": 3,
     "collapsed_lt5": true,
-    "auc": 0.5054347826086957,
+    "auc": 0.5580357142857143,
     "reliable": false,
     "block_promotion": true
+  },
+  "probability_path_health": {
+    "threshold": 0.675,
+    "auc": 0.5580357142857143,
+    "reliable": false,
+    "feature_count": 3,
+    "runtime_samples": 0,
+    "mean_p_raw": null,
+    "mean_p_pre": null,
+    "mean_p_cap": null,
+    "mean_gap_raw_pre": null,
+    "mean_gap_pre_cap": null,
+    "ticks_raw_ge_70": 0,
+    "ticks_pre_ge_50": 0,
+    "recent_boost_events": 0,
+    "hints": [
+      "features_activas_bajas(<5), posible compresión de probabilidad",
+      "modelo marcado como no confiable (reliable=false)",
+      "AUC marginal; evitar inflado agresivo sin recalibrar"
+    ]
   },
   "operational_guidance": {
     "official_gate_threshold": 0.85,
@@ -233,7 +243,8 @@
     ],
     "low_sample_bots": [],
     "yellow_flags": [
-      "decisiones_en_shadow_mode"
+      "decisiones_en_shadow_mode",
+      "falta_runtime_log"
     ],
     "next_checkpoint": {
       "closed_signals_target": 20,
