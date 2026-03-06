@@ -1,7 +1,7 @@
 # Reporte Integral de Salud IA
 
-Generado UTC: `2026-03-06T02:52:25.122510+00:00`
-Reporte ID: `137d62aa907e` (JSON/MD del mismo corte temporal)
+Generado UTC: `2026-03-06T03:06:22.996259+00:00`
+Reporte ID: `6f8ee88bd3c6` (JSON/MD del mismo corte temporal)
 
 ## 1) Calibración real de probabilidades
 - Señales cerradas: **0**
@@ -69,10 +69,21 @@ Reporte ID: `137d62aa907e` (JSON/MD del mismo corte temporal)
 - Señales para hotfix: reliable=false, features<5, threshold_alto, p_pre_bajo_o_sin_evidencia_runtime
 - Impacto esperado: limitado: p_pre no está cerca de la compuerta operativa
 
-## 9) Salud de ejecución (auth/ws/timeout)
+## 9) Diagnóstico causa raíz (por qué no hay picos 60-70)
+- Causa principal: **modelo_degradado_por_colapso_de_features**
+- WHY-NO clave: p_best<50=0, trigger_no=0, confirm_pending=0
+- reliable: **NO** | features activas: **3**
+- p_pre medio: **N/A** | objetivo operativo: **60.0%** | brecha: **N/A**
+- ¿Hotfix de threshold ayudaría?: **NO**
+- Condiciones para recuperar picos:
+  - recuperar >=5 features útiles en campeón
+  - re-entrenar y validar con confiabilidad real (reliable=true)
+  - evitar bajar compuertas sin evidencia de calibración
+
+## 10) Salud de ejecución (auth/ws/timeout)
 - No auditado en este run (falta `--runtime-log`).
 
-## 10) Recomendación de cuándo correr este programa
+## 11) Recomendación de cuándo correr este programa
 - **Recomendado siempre**: al iniciar sesión y luego cada 30-60 min.
 - **Corte de calidad fuerte**: después de cada bloque de +20 cierres nuevos.
 - **Punto mínimo para decisiones estructurales**:
@@ -82,7 +93,7 @@ Reporte ID: `137d62aa907e` (JSON/MD del mismo corte temporal)
   - ✅ auc>=0.53
 - Ready for full diagnosis: **False**
 
-## 11) Qué falta corregir si no está “bien”
+## 12) Qué falta corregir si no está “bien”
 - Nota: `Gap Prob-Hit señales` usa SOLO señales cerradas en `ia_signals_log.csv` y puede diferir de `WR last40 (csv)` del bot.
 - Gaps por bot se publican solo si `n señales IA >= 5` para evitar conclusiones con muestra mínima.
 - Si `precision@85` baja o n es pequeño: recalibrar/proteger compuerta.

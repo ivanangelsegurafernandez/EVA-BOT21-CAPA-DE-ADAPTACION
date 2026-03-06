@@ -1,6 +1,6 @@
 {
-  "report_id": "137d62aa907e",
-  "generated_at_utc": "2026-03-06T02:52:25.122510+00:00",
+  "report_id": "6f8ee88bd3c6",
+  "generated_at_utc": "2026-03-06T03:06:22.996259+00:00",
   "sources": {
     "signals_log": "ia_signals_log.csv",
     "diag_json": "diagnostico_pipeline_ia.json",
@@ -270,6 +270,28 @@
       "closed_signals_target": 20,
       "bin_90_100_target": 8
     }
+  },
+  "root_cause_analysis": {
+    "primary_cause": "modelo_degradado_por_colapso_de_features",
+    "why_no_top": {
+      "p_best_lt_50": 0,
+      "trigger_no": 0,
+      "confirm_pending": 0
+    },
+    "model_reliable": false,
+    "feature_count": 3,
+    "mean_p_raw": null,
+    "mean_p_pre": null,
+    "target_operational_prob": 0.6,
+    "gap_to_operational_target": null,
+    "hotfix_likely_effective": false,
+    "will_happen_always": false,
+    "recovery_conditions": [
+      "recuperar >=5 features útiles en campeón",
+      "re-entrenar y validar con confiabilidad real (reliable=true)",
+      "evitar bajar compuertas sin evidencia de calibración"
+    ],
+    "ready_for_full_diagnosis": false
   },
   "model_meta_hotfix_result": {
     "applied": false,

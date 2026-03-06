@@ -35,6 +35,7 @@ PRE_CAP_GAP_ALERT = 0.20
 HOTFIX_THRESHOLD_MAX = 0.62
 HOTFIX_MIN_AUC = 0.53
 HOTFIX_MIN_PRE_MEAN = 0.45
+SPIKE_TARGET = 0.60
 
 
 def _safe_float(v: Any) -> float | None:
@@ -494,6 +495,76 @@ def _apply_model_meta_hotfix(path: Path, plan: dict[str, Any]) -> dict[str, Any]
         return out
 
 
+
+
+def _root_cause_analysis(meta: dict[str, Any], runtime: dict[str, Any], probability_path: dict[str, Any], hotfix_plan: dict[str, Any], readiness: dict[str, Any]) -> dict[str, Any]:
+    why_counts = (runtime or {}).get('why_no_counts', {}) if isinstance(runtime, dict) else {}
+    c_pbest = int(why_counts.get('p_best<50.0%', 0) or 0)
+    c_trigger = int(why_counts.get('trigger_no', 0) or 0)
+    c_confirm = int(why_counts.get('confirm_pending(0/1)', 0) or 0) + int(why_counts.get('confirm_pending(0/2)', 0) or 0)
+
+    reliable = bool((meta or {}).get('reliable', False))
+    feat_count = len((meta or {}).get('feature_names', [])) if isinstance((meta or {}).get('feature_names', []), list) else 0
+    mean_pre = _safe_float((probability_path or {}).get('mean_p_pre'))
+    mean_raw = _safe_float((probability_path or {}).get('mean_p_raw'))
+
+    if isinstance(mean_pre, (int, float)):
+        gap_to_oper = max(0.0, SPIKE_TARGET - float(mean_pre))
+    else:
+        gap_to_oper = None
+
+    if c_pbest > 0 or c_trigger > 0:
+        primary = 'bloqueo_operativo_unrel50_trigger'
+    elif (not reliable) and feat_count < 5:
+        primary = 'modelo_degradado_por_colapso_de_features'
+    elif not isinstance(mean_pre, (int, float)):
+        primary = 'sin_evidencia_runtime_para_medicion_de_ruta'
+    else:
+        primary = 'compresion_probabilidades_sin_bloqueo_dominante'
+
+    always = False
+    recovery = []
+    if primary == 'bloqueo_operativo_unrel50_trigger':
+        recovery = [
+            'subir p_pre sostenido por encima de 50% (no solo picos aislados)',
+            'reducir frecuencia de trigger_no y confirm_pending',
+            'acumular cierres auditados para salir de estado AMBER/UNREL',
+        ]
+    elif primary == 'modelo_degradado_por_colapso_de_features':
+        recovery = [
+            'recuperar >=5 features útiles en campeón',
+            're-entrenar y validar con confiabilidad real (reliable=true)',
+            'evitar bajar compuertas sin evidencia de calibración',
+        ]
+    else:
+        recovery = [
+            'adjuntar runtime_log_ia.txt para medir p_raw/p_pre/p_cap',
+            'revisar calidad de señal por bot y calibración por bin',
+        ]
+
+    hotfix_likely_effective = bool((hotfix_plan or {}).get('eligible', False))
+    if primary == 'bloqueo_operativo_unrel50_trigger':
+        hotfix_likely_effective = False
+
+    return {
+        'primary_cause': primary,
+        'why_no_top': {
+            'p_best_lt_50': c_pbest,
+            'trigger_no': c_trigger,
+            'confirm_pending': c_confirm,
+        },
+        'model_reliable': reliable,
+        'feature_count': int(feat_count),
+        'mean_p_raw': mean_raw,
+        'mean_p_pre': mean_pre,
+        'target_operational_prob': SPIKE_TARGET,
+        'gap_to_operational_target': gap_to_oper,
+        'hotfix_likely_effective': hotfix_likely_effective,
+        'will_happen_always': always,
+        'recovery_conditions': recovery,
+        'ready_for_full_diagnosis': bool((readiness or {}).get('ready_for_full_diagnosis', False)),
+    }
+
 def _parse_runtime_log(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {'exists': False, 'path': str(path), 'errors': {}, 'why_no_counts': {}}
@@ -649,6 +720,7 @@ def build_report(runtime_log: Path | None) -> dict[str, Any]:
 
     readiness = _readiness(meta, len(closed))
     guidance = _operational_guidance(bots, adaptive_hint, runtime)
+    root_cause = _root_cause_analysis(meta, runtime, probability_path, hotfix_plan, readiness)
 
     report_id = _snapshot_id([LOG_SIGNALS, DIAG, MODEL_META, REAL_STATE, runtime_used or RUNTIME_DEFAULT])
     collapse_guard = _model_collapse_guard(meta)
@@ -691,6 +763,7 @@ def build_report(runtime_log: Path | None) -> dict[str, Any]:
         'probability_path_health': probability_path,
         'model_meta_hotfix_plan': hotfix_plan,
         'operational_guidance': guidance,
+        'root_cause_analysis': root_cause,
     }
     return report
 
@@ -796,7 +869,20 @@ def render_md(rep: dict[str, Any]) -> str:
     lines.append(f"- Impacto esperado: {hp.get('impact_note', 'N/A')}")
     lines.append('')
 
-    lines.append('## 9) Salud de ejecución (auth/ws/timeout)')
+    lines.append('## 9) Diagnóstico causa raíz (por qué no hay picos 60-70)')
+    rc = rep.get('root_cause_analysis', {}) or {}
+    lines.append(f"- Causa principal: **{rc.get('primary_cause', 'N/A')}**")
+    why_top = rc.get('why_no_top', {}) or {}
+    lines.append(f"- WHY-NO clave: p_best<50={int(why_top.get('p_best_lt_50', 0) or 0)}, trigger_no={int(why_top.get('trigger_no', 0) or 0)}, confirm_pending={int(why_top.get('confirm_pending', 0) or 0)}")
+    lines.append(f"- reliable: **{'SI' if rc.get('model_reliable') else 'NO'}** | features activas: **{int(rc.get('feature_count', 0) or 0)}**")
+    lines.append(f"- p_pre medio: **{pct(rc.get('mean_p_pre'))}** | objetivo operativo: **{pct(rc.get('target_operational_prob'))}** | brecha: **{pct(rc.get('gap_to_operational_target'))}**")
+    lines.append(f"- ¿Hotfix de threshold ayudaría?: **{'SI' if rc.get('hotfix_likely_effective') else 'NO'}**")
+    lines.append('- Condiciones para recuperar picos:')
+    for cond in rc.get('recovery_conditions', []):
+        lines.append(f"  - {cond}")
+    lines.append('')
+
+    lines.append('## 10) Salud de ejecución (auth/ws/timeout)')
     rh = rep['runtime_health']
     if not rh.get('exists'):
         lines.append('- No auditado en este run (falta `--runtime-log`).')
@@ -809,7 +895,7 @@ def render_md(rep: dict[str, Any]) -> str:
             top = sorted(wh.items(), key=lambda x: x[1], reverse=True)[:8]
             lines.append('- WHY-NO más frecuentes: ' + ', '.join([f"{k}:{v}" for k, v in top]))
     lines.append('')
-    lines.append('## 10) Recomendación de cuándo correr este programa')
+    lines.append('## 11) Recomendación de cuándo correr este programa')
     lines.append('- **Recomendado siempre**: al iniciar sesión y luego cada 30-60 min.')
     lines.append('- **Corte de calidad fuerte**: después de cada bloque de +20 cierres nuevos.')
     lines.append('- **Punto mínimo para decisiones estructurales**:')
@@ -817,7 +903,7 @@ def render_md(rep: dict[str, Any]) -> str:
         lines.append(f"  - {'✅' if ok else '❌'} {k}")
     lines.append(f"- Ready for full diagnosis: **{rd['ready_for_full_diagnosis']}**")
     lines.append('')
-    lines.append('## 11) Qué falta corregir si no está “bien”')
+    lines.append('## 12) Qué falta corregir si no está “bien”')
     lines.append('- Nota: `Gap Prob-Hit señales` usa SOLO señales cerradas en `ia_signals_log.csv` y puede diferir de `WR last40 (csv)` del bot.')
     lines.append(f'- Gaps por bot se publican solo si `n señales IA >= {MIN_SIGNALS_FOR_BOT_GAP}` para evitar conclusiones con muestra mínima.')
     lines.append('- Si `precision@85` baja o n es pequeño: recalibrar/proteger compuerta.')
@@ -834,6 +920,7 @@ def main() -> int:
     ap.add_argument('--json-out', type=str, default=str(OUT_JSON))
     ap.add_argument('--md-out', type=str, default=str(OUT_MD))
     ap.add_argument('--apply-hotfix-model-meta', action='store_true', help='Aplica hotfix seguro en model_meta.json si es elegible (crea backup).')
+    ap.add_argument('--print-root-cause', action='store_true', help='Imprime un resumen corto de causa raíz en consola.')
     args = ap.parse_args()
 
     runtime_path = Path(args.runtime_log) if args.runtime_log else None
@@ -855,6 +942,9 @@ def main() -> int:
     if args.apply_hotfix_model_meta:
         fx = rep.get('model_meta_hotfix_result', {})
         print(f"🛠️ Hotfix model_meta: {'APLICADO' if fx.get('applied') else 'NO_APLICADO'} | {fx.get('message', '')}")
+    if args.print_root_cause:
+        rc = rep.get('root_cause_analysis', {}) or {}
+        print(f"🧭 Causa raíz: {rc.get('primary_cause', 'N/A')} | p_pre={rc.get('mean_p_pre', 'N/A')} | hotfix_util={rc.get('hotfix_likely_effective', False)}")
     return 0
 
 
