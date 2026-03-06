@@ -5,6 +5,8 @@ import argparse
 import csv
 import json
 import hashlib
+import re
+import time
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -28,6 +30,11 @@ EWMA_MIN_SIGNALS_MATURE = 8
 THRESHOLD_HINT_MIN_CLOSED = 20
 THRESHOLD_HINT_MIN_BIN_90 = 8
 EWMA_HEALTH_MIN_MATURE_BOTS = 2
+RAW_PRE_GAP_ALERT = 0.35
+PRE_CAP_GAP_ALERT = 0.20
+HOTFIX_THRESHOLD_MAX = 0.62
+HOTFIX_MIN_AUC = 0.53
+HOTFIX_MIN_PRE_MEAN = 0.45
 
 
 def _safe_float(v: Any) -> float | None:
@@ -306,6 +313,187 @@ def _model_collapse_guard(meta: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _probability_path_health(meta: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+    threshold = _safe_float((meta or {}).get('threshold'))
+    auc = _safe_float((meta or {}).get('auc'))
+    reliable = bool((meta or {}).get('reliable', False))
+    feature_count = len(meta.get('feature_names', [])) if isinstance(meta.get('feature_names', []), list) else 0
+
+    lines = []
+    rt_path = runtime.get('path') if isinstance(runtime, dict) else None
+    if rt_path:
+        try:
+            lines = Path(str(rt_path)).read_text(encoding='utf-8', errors='ignore').splitlines()
+        except Exception:
+            lines = []
+
+    p_raw_vals: list[float] = []
+    p_pre_vals: list[float] = []
+    p_cap_vals: list[float] = []
+    with_raw_over_70 = 0
+    with_pre_over_50 = 0
+    recent_boost_events = 0
+
+    for ln in lines[-8000:]:
+        if 'WHY-NO:' in ln:
+            m_raw = re.search(r"p_raw=([0-9]+(?:\.[0-9]+)?)%", ln)
+            m_pre = re.search(r"p_pre=([0-9]+(?:\.[0-9]+)?)%", ln)
+            m_cap = re.search(r"p_cap=([0-9]+(?:\.[0-9]+)?)%", ln)
+            raw = float(m_raw.group(1)) / 100.0 if m_raw else None
+            pre = float(m_pre.group(1)) / 100.0 if m_pre else None
+            cap = float(m_cap.group(1)) / 100.0 if m_cap else None
+            if raw is not None:
+                p_raw_vals.append(raw)
+                if raw >= 0.70:
+                    with_raw_over_70 += 1
+            if pre is not None:
+                p_pre_vals.append(pre)
+                if pre >= 0.50:
+                    with_pre_over_50 += 1
+            if cap is not None:
+                p_cap_vals.append(cap)
+        if 'p_racha=' in ln or 'Incremental:' in ln:
+            recent_boost_events += 1
+
+    n_pairs = min(len(p_raw_vals), len(p_pre_vals))
+    mean_raw = (sum(p_raw_vals) / len(p_raw_vals)) if p_raw_vals else None
+    mean_pre = (sum(p_pre_vals) / len(p_pre_vals)) if p_pre_vals else None
+    mean_cap = (sum(p_cap_vals) / len(p_cap_vals)) if p_cap_vals else None
+    mean_raw_pre_gap = ((sum((r - p_pre_vals[i]) for i, r in enumerate(p_raw_vals[:n_pairs])) / n_pairs) if n_pairs > 0 else None)
+    pre_cap_pairs = min(len(p_pre_vals), len(p_cap_vals))
+    mean_pre_cap_gap = ((sum((p_pre_vals[i] - p_cap_vals[i]) for i in range(pre_cap_pairs)) / pre_cap_pairs) if pre_cap_pairs > 0 else None)
+
+    hints: list[str] = []
+    if feature_count < 5:
+        hints.append('features_activas_bajas(<5), posible compresión de probabilidad')
+    if isinstance(mean_raw_pre_gap, (int, float)) and mean_raw_pre_gap > RAW_PRE_GAP_ALERT:
+        hints.append('brecha alta p_raw→p_pre: revisar transformaciones previas al gate')
+    if isinstance(mean_pre_cap_gap, (int, float)) and mean_pre_cap_gap > PRE_CAP_GAP_ALERT:
+        hints.append('cap está recortando demasiado p_pre')
+    if not reliable:
+        hints.append('modelo marcado como no confiable (reliable=false)')
+    if isinstance(auc, (int, float)) and auc < 0.56:
+        hints.append('AUC marginal; evitar inflado agresivo sin recalibrar')
+    if len(lines) > 0 and recent_boost_events == 0:
+        hints.append('no se observaron eventos de boost incremental recientes en runtime')
+
+    return {
+        'threshold': threshold,
+        'auc': auc,
+        'reliable': reliable,
+        'feature_count': int(feature_count),
+        'runtime_samples': int(len(p_pre_vals)),
+        'mean_p_raw': mean_raw,
+        'mean_p_pre': mean_pre,
+        'mean_p_cap': mean_cap,
+        'mean_gap_raw_pre': mean_raw_pre_gap,
+        'mean_gap_pre_cap': mean_pre_cap_gap,
+        'ticks_raw_ge_70': int(with_raw_over_70),
+        'ticks_pre_ge_50': int(with_pre_over_50),
+        'recent_boost_events': int(recent_boost_events),
+        'hints': hints,
+    }
+
+
+def _plan_model_meta_hotfix(meta: dict[str, Any], probability_path: dict[str, Any], runtime: dict[str, Any]) -> dict[str, Any]:
+    thr = _safe_float((meta or {}).get('threshold'))
+    auc = _safe_float((meta or {}).get('auc'))
+    reliable = bool((meta or {}).get('reliable', False))
+    features = int(probability_path.get('feature_count', 0) or 0)
+    mean_pre = _safe_float(probability_path.get('mean_p_pre'))
+
+    reasons: list[str] = []
+    if not reliable:
+        reasons.append('reliable=false')
+    if features < 5:
+        reasons.append('features<5')
+    if isinstance(thr, (int, float)) and thr > HOTFIX_THRESHOLD_MAX:
+        reasons.append('threshold_alto')
+    if isinstance(auc, (int, float)) and auc < HOTFIX_MIN_AUC:
+        reasons.append('auc_bajo_para_hotfix')
+    if not isinstance(mean_pre, (int, float)) or mean_pre < HOTFIX_MIN_PRE_MEAN:
+        reasons.append('p_pre_bajo_o_sin_evidencia_runtime')
+
+    eligible = (
+        not reliable and
+        features < 5 and
+        isinstance(thr, (int, float)) and thr > HOTFIX_THRESHOLD_MAX and
+        isinstance(auc, (int, float)) and auc >= HOTFIX_MIN_AUC and
+        isinstance(mean_pre, (int, float)) and mean_pre >= HOTFIX_MIN_PRE_MEAN
+    )
+
+    why_counts = runtime.get('why_no_counts', {}) if isinstance(runtime, dict) else {}
+    pbest_low = int(why_counts.get('p_best<50.0%', 0) or 0)
+    trig_no = int(why_counts.get('trigger_no', 0) or 0)
+    if pbest_low > 0 or trig_no > 0:
+        impact_note = 'limitado: no corrige bloqueo UNREL50 por p_best<50%/trigger_no'
+    elif not isinstance(mean_pre, (int, float)) or mean_pre < HOTFIX_MIN_PRE_MEAN:
+        impact_note = 'limitado: p_pre no está cerca de la compuerta operativa'
+    else:
+        impact_note = 'potencial: puede destrabar si p_pre ya está cerca de compuerta'
+
+    suggested = float(min(float(thr), HOTFIX_THRESHOLD_MAX)) if isinstance(thr, (int, float)) else None
+    return {
+        'eligible': bool(eligible),
+        'reasons': reasons,
+        'current_threshold': thr,
+        'suggested_threshold': suggested,
+        'mean_p_pre': mean_pre,
+        'impact_note': impact_note,
+        'safety_rules': {
+            'require_reliable_false': True,
+            'require_features_lt5': True,
+            'require_auc_gte': HOTFIX_MIN_AUC,
+            'max_threshold_after_hotfix': HOTFIX_THRESHOLD_MAX,
+            'min_mean_p_pre_required': HOTFIX_MIN_PRE_MEAN,
+        },
+    }
+
+
+def _apply_model_meta_hotfix(path: Path, plan: dict[str, Any]) -> dict[str, Any]:
+    out = {'applied': False, 'path': str(path), 'backup': None, 'message': ''}
+    if not bool(plan.get('eligible', False)):
+        out['message'] = 'Hotfix no elegible con las reglas de seguridad actuales.'
+        return out
+    meta = _read_json(path)
+    if not meta:
+        out['message'] = 'model_meta.json no disponible para aplicar hotfix.'
+        return out
+
+    current = _safe_float(meta.get('threshold'))
+    suggested = _safe_float(plan.get('suggested_threshold'))
+    if current is None or suggested is None:
+        out['message'] = 'threshold inválido; no se aplicó hotfix.'
+        return out
+    if suggested >= current:
+        out['message'] = 'threshold actual ya es conservador; no se aplicó hotfix.'
+        return out
+
+    backup = path.with_name(f"{path.name}.bak_{int(time.time())}")
+    try:
+        backup.write_text(path.read_text(encoding='utf-8'), encoding='utf-8')
+    except Exception:
+        out['message'] = 'No se pudo crear backup; hotfix cancelado.'
+        return out
+
+    meta['threshold_prev'] = current
+    meta['threshold'] = suggested
+    meta['hotfix'] = {
+        'applied_at_utc': _now_iso(),
+        'type': 'threshold_relax_for_degraded_model',
+        'reason': 'reliable=false + features<5 + threshold_alto',
+        'previous_threshold': current,
+        'new_threshold': suggested,
+    }
+    try:
+        path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding='utf-8')
+        out.update({'applied': True, 'backup': str(backup), 'message': 'Hotfix aplicado correctamente.'})
+        return out
+    except Exception as e:
+        out['message'] = f'Error escribiendo model_meta.json: {e}'
+        return out
+
+
 def _parse_runtime_log(path: Path) -> dict[str, Any]:
     if not path.exists():
         return {'exists': False, 'path': str(path), 'errors': {}, 'why_no_counts': {}}
@@ -449,6 +637,9 @@ def build_report(runtime_log: Path | None) -> dict[str, Any]:
     if runtime_used is not None:
         runtime = _parse_runtime_log(runtime_used)
 
+    probability_path = _probability_path_health(meta, runtime)
+    hotfix_plan = _plan_model_meta_hotfix(meta, probability_path, runtime)
+
     promos_tail = []
     if PROMOS.exists():
         try:
@@ -497,6 +688,8 @@ def build_report(runtime_log: Path | None) -> dict[str, Any]:
         },
         'readiness_recommendation': readiness,
         'model_health': collapse_guard,
+        'probability_path_health': probability_path,
+        'model_meta_hotfix_plan': hotfix_plan,
         'operational_guidance': guidance,
     }
     return report
@@ -582,7 +775,28 @@ def render_md(rep: dict[str, Any]) -> str:
     lines.append(f"- reliable: **{'SI' if mh.get('reliable') else 'NO'}** | AUC: **{mh.get('auc') if isinstance(mh.get('auc'), (int, float)) else 'N/A'}**")
     lines.append(f"- Bloquear promoción por colapso: **{'SI' if mh.get('block_promotion') else 'NO'}**")
 
-    lines.append('## 7) Salud de ejecución (auth/ws/timeout)')
+    lines.append('## 7) Salud de ruta de probabilidad (raw → pre → cap)')
+    ph = rep.get('probability_path_health', {}) or {}
+    lines.append(f"- threshold campeón: **{pct(ph.get('threshold'))}** | auc: **{ph.get('auc') if isinstance(ph.get('auc'), (int, float)) else 'N/A'}** | reliable: **{'SI' if ph.get('reliable') else 'NO'}**")
+    lines.append(f"- features activas: **{int(ph.get('feature_count', 0) or 0)}** | muestras runtime parseadas: **{int(ph.get('runtime_samples', 0) or 0)}**")
+    lines.append(f"- media p_raw: **{pct(ph.get('mean_p_raw'))}** | media p_pre: **{pct(ph.get('mean_p_pre'))}** | media p_cap: **{pct(ph.get('mean_p_cap'))}**")
+    lines.append(f"- gap medio raw→pre: **{pct(ph.get('mean_gap_raw_pre'))}** | gap medio pre→cap: **{pct(ph.get('mean_gap_pre_cap'))}**")
+    lines.append(f"- ticks con p_raw>=70%: **{int(ph.get('ticks_raw_ge_70', 0) or 0)}** | ticks con p_pre>=50%: **{int(ph.get('ticks_pre_ge_50', 0) or 0)}** | eventos boost recientes: **{int(ph.get('recent_boost_events', 0) or 0)}**")
+    hints = ph.get('hints') or []
+    lines.append(f"- Alertas de la ruta: {', '.join(hints) if hints else 'sin alertas'}")
+    lines.append('')
+
+    lines.append('## 8) Plan de corrección automática (hotfix model_meta)')
+    hp = rep.get('model_meta_hotfix_plan', {}) or {}
+    lines.append(f"- Elegible: **{'SI' if hp.get('eligible') else 'NO'}**")
+    lines.append(f"- Threshold actual: **{pct(hp.get('current_threshold'))}** | sugerido: **{pct(hp.get('suggested_threshold'))}**")
+    lines.append(f"- p_pre medio (runtime): **{pct(hp.get('mean_p_pre'))}**")
+    rs = hp.get('reasons') or []
+    lines.append(f"- Señales para hotfix: {', '.join(rs) if rs else 'sin señales'}")
+    lines.append(f"- Impacto esperado: {hp.get('impact_note', 'N/A')}")
+    lines.append('')
+
+    lines.append('## 9) Salud de ejecución (auth/ws/timeout)')
     rh = rep['runtime_health']
     if not rh.get('exists'):
         lines.append('- No auditado en este run (falta `--runtime-log`).')
@@ -595,7 +809,7 @@ def render_md(rep: dict[str, Any]) -> str:
             top = sorted(wh.items(), key=lambda x: x[1], reverse=True)[:8]
             lines.append('- WHY-NO más frecuentes: ' + ', '.join([f"{k}:{v}" for k, v in top]))
     lines.append('')
-    lines.append('## 8) Recomendación de cuándo correr este programa')
+    lines.append('## 10) Recomendación de cuándo correr este programa')
     lines.append('- **Recomendado siempre**: al iniciar sesión y luego cada 30-60 min.')
     lines.append('- **Corte de calidad fuerte**: después de cada bloque de +20 cierres nuevos.')
     lines.append('- **Punto mínimo para decisiones estructurales**:')
@@ -603,7 +817,7 @@ def render_md(rep: dict[str, Any]) -> str:
         lines.append(f"  - {'✅' if ok else '❌'} {k}")
     lines.append(f"- Ready for full diagnosis: **{rd['ready_for_full_diagnosis']}**")
     lines.append('')
-    lines.append('## 9) Qué falta corregir si no está “bien”')
+    lines.append('## 11) Qué falta corregir si no está “bien”')
     lines.append('- Nota: `Gap Prob-Hit señales` usa SOLO señales cerradas en `ia_signals_log.csv` y puede diferir de `WR last40 (csv)` del bot.')
     lines.append(f'- Gaps por bot se publican solo si `n señales IA >= {MIN_SIGNALS_FOR_BOT_GAP}` para evitar conclusiones con muestra mínima.')
     lines.append('- Si `precision@85` baja o n es pequeño: recalibrar/proteger compuerta.')
@@ -619,16 +833,28 @@ def main() -> int:
     ap.add_argument('--runtime-log', type=str, default='', help='Ruta a log de consola/runtime para auditar auth/ws y WHY-NO tick a tick. Si se omite, usa runtime_log_ia.txt si existe.')
     ap.add_argument('--json-out', type=str, default=str(OUT_JSON))
     ap.add_argument('--md-out', type=str, default=str(OUT_MD))
+    ap.add_argument('--apply-hotfix-model-meta', action='store_true', help='Aplica hotfix seguro en model_meta.json si es elegible (crea backup).')
     args = ap.parse_args()
 
     runtime_path = Path(args.runtime_log) if args.runtime_log else None
     rep = build_report(runtime_path)
+
+    if args.apply_hotfix_model_meta:
+        fx = _apply_model_meta_hotfix(MODEL_META, rep.get('model_meta_hotfix_plan', {}) or {})
+        rep['model_meta_hotfix_result'] = fx
+        if fx.get('applied'):
+            # reconstruir reporte para reflejar el nuevo threshold en salida
+            rep = build_report(runtime_path)
+            rep['model_meta_hotfix_result'] = fx
 
     Path(args.json_out).write_text(json.dumps(rep, ensure_ascii=False, indent=2), encoding='utf-8')
     Path(args.md_out).write_text(render_md(rep), encoding='utf-8')
 
     print(f"✅ Reporte JSON: {args.json_out}")
     print(f"✅ Reporte MD:   {args.md_out}")
+    if args.apply_hotfix_model_meta:
+        fx = rep.get('model_meta_hotfix_result', {})
+        print(f"🛠️ Hotfix model_meta: {'APLICADO' if fx.get('applied') else 'NO_APLICADO'} | {fx.get('message', '')}")
     return 0
 
 
